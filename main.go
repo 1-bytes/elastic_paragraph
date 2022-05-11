@@ -6,6 +6,7 @@ import (
 	"elastic_paragraph/model"
 	"elastic_paragraph/pkg/elastic"
 	"encoding/json"
+	"io"
 	"log"
 	"strconv"
 )
@@ -18,6 +19,9 @@ func main() {
 	for {
 		do, err := scroll.Do(context.Background())
 		if err != nil {
+			if err == io.EOF {
+				break
+			}
 			panic(err)
 		}
 		if len(do.Hits.Hits) <= 0 {
@@ -45,6 +49,7 @@ func main() {
 			continue
 		}
 	}
+	log.Println("done.")
 }
 
 type Source struct {
