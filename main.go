@@ -36,45 +36,50 @@ func main() {
 			break
 		}
 
+		paragraphListJson := config.ParagraphListStruct{}
 		var paragraphModel []model.DictParagraphModel
 		for _, hits := range do.Hits.Hits {
 			source := config.SourceStruct{}
 			_ = json.Unmarshal(hits.Source, &source)
 			// ----------------- 段落难度评级数据插入到 MySQL 数据库 -----------------
-			paragraphListJson := config.ParagraphListStruct{ParagraphList: []config.ParagraphList{
-				{
-					ParagraphListId: 0,
-					Paragraph:       source.Paragraph.EN,
-				},
-			}}
-			bodyJson, err := json.Marshal(paragraphListJson)
-			respJson, err := fetcher.Fetch(http.MethodPost, api, bodyJson)
-			if err != nil {
-				fmt.Errorf("error: Get word difficultyAnalysis failed: %v", err)
-				continue
-			}
-			var resp []config.RespStruct
-			err = json.Unmarshal(respJson, &resp)
-
-			// ----------------- 查出的数据插入到 MySQL 数据库 -----------------
 			ArticleID, err := strconv.Atoi(source.Id)
 			if err != nil {
 				log.Printf("error: conversion source.id to int failed, source.id: %s", source.Id)
 				continue
 			}
+			// 需要评级难度的数据组合到一起 准备发送给接口
+			paragraphListJson.ParagraphList = append(paragraphListJson.ParagraphList, config.ParagraphList{
+				ParagraphListId: 0,
+				Paragraph:       source.Paragraph.EN,
+			})
+			// ES 里面存储的一些基本信息先保存一份后面会用到
 			paragraphModel = append(paragraphModel, model.DictParagraphModel{
-				ElasticId:     hits.Id,
-				ArticleId:     ArticleID,
-				ByteCount:     len(source.Paragraph.EN),
-				Fre:           fmt.Sprintf("%f", resp[0].DifficultyAnalysis.Fre),
-				Fkgl:          fmt.Sprintf("%f", resp[0].DifficultyAnalysis.Fkgl),
-				SchoolLvClass: resp[0].DifficultyAnalysis.SchoolLvClass,
-				SchoolLvlName: resp[0].DifficultyAnalysis.SchoolLvlName,
-				TechWordLv:    resp[0].DifficultyAnalysis.TeachWordLv,
-				CefrWordLv:    resp[0].DifficultyAnalysis.CefrWordLv,
-				Status:        1,
+				ElasticId: hits.Id,
+				ArticleId: ArticleID,
+				ByteCount: len(source.Paragraph.EN),
 			})
 		}
+		// 将数据提交给难度评级的接口
+		bodyJson, err := json.Marshal(paragraphListJson)
+		respJson, err := fetcher.Fetch(http.MethodPost, api, bodyJson)
+		if err != nil {
+			fmt.Errorf("error: Get word difficultyAnalysis failed: %v", err)
+			continue
+		}
+		var resp []config.RespStruct
+		err = json.Unmarshal(respJson, &resp)
+		// 将难度评级的结果和 ES 里面的数据结合
+		for key, value := range resp {
+			paragraphModel[key].Fre = fmt.Sprintf("%f", value.DifficultyAnalysis.Fre)
+			paragraphModel[key].Fkgl = fmt.Sprintf("%f", value.DifficultyAnalysis.Fkgl)
+			paragraphModel[key].SchoolLvClass = value.DifficultyAnalysis.SchoolLvClass
+			paragraphModel[key].SchoolLvlName = value.DifficultyAnalysis.SchoolLvlName
+			paragraphModel[key].TechWordLv = value.DifficultyAnalysis.TeachWordLv
+			paragraphModel[key].CefrWordLv = value.DifficultyAnalysis.CefrWordLv
+			paragraphModel[key].Status = 1
+		}
+
+		// 插入到 MySQL 当中
 		db := bootstrap.DB
 		tx := db.Table(model.TableDictParagraph).Create(&paragraphModel)
 		if tx.Error != nil {
