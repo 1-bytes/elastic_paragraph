@@ -5,7 +5,7 @@ type SourceStruct struct {
 	SourceDomain string `json:"source_domain"`
 	SourceUrl    string `json:"source_url"`
 	Paragraph    struct {
-		EN string `json:"EN"`
+		EN string `json:"en"`
 	} `json:"paragraph"`
 }
 

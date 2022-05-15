@@ -9,6 +9,8 @@ import (
 	"elastic_paragraph/pkg/fetcher"
 	"encoding/json"
 	"fmt"
+	elasticSearch "github.com/olivere/elastic/v7"
+	"gorm.io/gorm"
 	"io"
 	"log"
 	"net/http"
@@ -17,6 +19,76 @@ import (
 
 func main() {
 	bootstrap.Setup()
+	// FullEStoMySQL()
+	PartMySQL()
+}
+
+// PartMySQL 根据MySQL里面的数据差异化进行评级
+func PartMySQL() {
+	client := elastic.GetInstance()
+	// 难度评级接口
+	api := "http://127.0.0.1:9002/difficultyAnalysis"
+	step := 5
+	db := bootstrap.DB
+	// 从 MySQL 中分批取出 Fre 为空的数据
+	var paragraphModel []model.DictArticleParagraph
+	tx := db.Table("dict_article_paragraph").
+		Where("fre = ?", "").
+		Limit(step).
+		Find(&paragraphModel)
+	if tx.Error != nil && tx.Error != gorm.ErrRecordNotFound {
+		panic(fmt.Errorf("error: get paragraph model failed, err: %s", tx.Error))
+	}
+	// 拿着mysql当中的 elastic_id 去 elasticsearch 中查询
+	var paragraphListJson config.ParagraphListStruct
+	for key, paragraph := range paragraphModel {
+		fmt.Println(key, paragraph.ElasticID)
+		idsQuery := elasticSearch.NewIdsQuery()
+		idsQuery.Ids(paragraph.ElasticID)
+		do, err := client.Search("dict_article").
+			Size(1).
+			Query(idsQuery).
+			Do(context.Background())
+		if err != nil || do.Hits.TotalHits.Value == 0 {
+			panic(fmt.Errorf("error: get paragraph data is null, elasticsearch id: %s", paragraph.ElasticID))
+		}
+		source := config.SourceStruct{}
+		_ = json.Unmarshal(do.Hits.Hits[0].Source, &source)
+		paragraphListJson.ParagraphList = append(paragraphListJson.ParagraphList, config.ParagraphList{
+			ParagraphListId: 0,
+			Paragraph:       source.Paragraph.EN,
+		})
+	}
+	// 将数据提交给难度评级的接口
+	bodyJson, err := json.Marshal(paragraphListJson)
+	respJson, err := fetcher.Fetch(http.MethodPost, api, bodyJson)
+	if err != nil {
+		panic(fmt.Errorf("error: Get word difficultyAnalysis failed: %v", err))
+	}
+	var resp []config.RespStruct
+	_ = json.Unmarshal(respJson, &resp)
+	// 将难度评级的结果和 ES 里面的数据结合
+	for key, value := range resp {
+		paragraphModel[key].Fre = fmt.Sprintf("%f", value.DifficultyAnalysis.Fre)
+		paragraphModel[key].Fkgl = fmt.Sprintf("%f", value.DifficultyAnalysis.Fkgl)
+		paragraphModel[key].SchoolLvClass = uint(value.DifficultyAnalysis.SchoolLvClass)
+		paragraphModel[key].SchoolLvlName = value.DifficultyAnalysis.SchoolLvlName
+		paragraphModel[key].TechWordLv = value.DifficultyAnalysis.TeachWordLv
+		paragraphModel[key].CefrWordLv = value.DifficultyAnalysis.CefrWordLv
+		paragraphModel[key].Status = 1
+	}
+	// 插入到 MySQL 当中
+	tx = db.Table(paragraphModel[0].TableName()).Save(&paragraphModel)
+	if tx.Error != nil {
+		log.Printf("error: update paragraph model failed, err: %s", tx.Error)
+		return
+	}
+	log.Println("success: create paragraph model success / step: ", step)
+	return
+}
+
+// FullEStoMySQL 根据ES里面的数据 全量进行难度评级
+func FullEStoMySQL() {
 	client := elastic.GetInstance()
 	// 难度评级接口
 	api := "http://127.0.0.1:9002/difficultyAnalysis"
@@ -37,7 +109,7 @@ func main() {
 		}
 
 		paragraphListJson := config.ParagraphListStruct{}
-		var paragraphModel []model.DictParagraphModel
+		var paragraphModel []model.DictArticleParagraph
 		for _, hits := range do.Hits.Hits {
 			source := config.SourceStruct{}
 			_ = json.Unmarshal(hits.Source, &source)
@@ -53,10 +125,10 @@ func main() {
 				Paragraph:       source.Paragraph.EN,
 			})
 			// ES 里面存储的一些基本信息先保存一份后面会用到
-			paragraphModel = append(paragraphModel, model.DictParagraphModel{
-				ElasticId: hits.Id,
-				ArticleId: ArticleID,
-				ByteCount: len(source.Paragraph.EN),
+			paragraphModel = append(paragraphModel, model.DictArticleParagraph{
+				ElasticID: hits.Id,
+				ArticleID: uint(ArticleID),
+				ByteCount: uint(len(source.Paragraph.EN)),
 			})
 		}
 		// 将数据提交给难度评级的接口
@@ -72,7 +144,7 @@ func main() {
 		for key, value := range resp {
 			paragraphModel[key].Fre = fmt.Sprintf("%f", value.DifficultyAnalysis.Fre)
 			paragraphModel[key].Fkgl = fmt.Sprintf("%f", value.DifficultyAnalysis.Fkgl)
-			paragraphModel[key].SchoolLvClass = value.DifficultyAnalysis.SchoolLvClass
+			paragraphModel[key].SchoolLvClass = uint(value.DifficultyAnalysis.SchoolLvClass)
 			paragraphModel[key].SchoolLvlName = value.DifficultyAnalysis.SchoolLvlName
 			paragraphModel[key].TechWordLv = value.DifficultyAnalysis.TeachWordLv
 			paragraphModel[key].CefrWordLv = value.DifficultyAnalysis.CefrWordLv
@@ -81,7 +153,7 @@ func main() {
 
 		// 插入到 MySQL 当中
 		db := bootstrap.DB
-		tx := db.Table(model.TableDictParagraph).Create(&paragraphModel)
+		tx := db.Table(paragraphModel[0].TableName()).Create(&paragraphModel)
 		if tx.Error != nil {
 			log.Printf("error: create paragraph model failed, err: %s", tx.Error)
 			continue
