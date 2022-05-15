@@ -10,17 +10,31 @@ import (
 	"encoding/json"
 	"fmt"
 	elasticSearch "github.com/olivere/elastic/v7"
+	"github.com/panjf2000/ants/v2"
 	"gorm.io/gorm"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 )
 
 func main() {
 	bootstrap.Setup()
 	// FullEStoMySQL()
-	PartMySQL()
+	//PartMySQL()
+	defer ants.Release()
+	runTimes := 100000
+	var wg sync.WaitGroup
+	p, _ := ants.NewPoolWithFunc(1, func(_ interface{}) {
+		PartMySQL()
+		wg.Done()
+	})
+	for i := 0; i < runTimes; i++ {
+		wg.Add(1)
+		p.Invoke(0)
+	}
+	wg.Wait()
 }
 
 // PartMySQL 根据MySQL里面的数据差异化进行评级
@@ -28,7 +42,7 @@ func PartMySQL() {
 	client := elastic.GetInstance()
 	// 难度评级接口
 	api := "http://127.0.0.1:9002/difficultyAnalysis"
-	step := 5
+	step := 1000
 	db := bootstrap.DB
 	// 从 MySQL 中分批取出 Fre 为空的数据
 	var paragraphModel []model.DictArticleParagraph
@@ -41,8 +55,8 @@ func PartMySQL() {
 	}
 	// 拿着mysql当中的 elastic_id 去 elasticsearch 中查询
 	var paragraphListJson config.ParagraphListStruct
-	for key, paragraph := range paragraphModel {
-		fmt.Println(key, paragraph.ElasticID)
+	for _, paragraph := range paragraphModel {
+		//fmt.Println(key, paragraph.ElasticID)
 		idsQuery := elasticSearch.NewIdsQuery()
 		idsQuery.Ids(paragraph.ElasticID)
 		do, err := client.Search("dict_article").
